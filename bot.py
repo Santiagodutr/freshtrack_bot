@@ -1,9 +1,10 @@
 """
-bot.py - FreshTrack AI Bot de Telegram v2
+bot.py - FreshTrack AI Bot de Telegram v3 — UI Interactiva
 Sistema completo de control de inventario para bodegas de perecederos.
 
 Comandos:
-  /start       - Bienvenida
+  /start       - Bienvenida + menú interactivo
+  /cancelar    - Sale de cualquier flujo activo
   /stock       - Inventario ordenado FEFO
   /alertas     - Productos que vencen en ≤3 días
   /vencidos    - Dar de baja productos vencidos
@@ -15,6 +16,12 @@ Comandos:
   /clientes    - Ver lista de clientes
   /addcliente  - Agregar nuevo cliente
   /ayuda       - Ayuda completa
+
+Menú interactivo (botones):
+  📦 Nueva Entrada → wizard paso a paso
+  🔥 Consumo       → selección desde stock
+  🚚 Despacho      → selección de cliente + productos
+  🔍 Ver Stock / ⚠️ Alertas / 📊 Reporte → consultas directas
 """
 
 import os
@@ -25,11 +32,13 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    filters, ContextTypes
+    CallbackQueryHandler, filters, ContextTypes,
 )
 
 import database as db
 import ai_parser
+import keyboards as kb
+import conversations
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -83,26 +92,19 @@ def _truncar(texto: str, limite: int = 4000) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     mensaje = (
-        f"👋 Hola *{user.first_name}*, soy *FreshTrack AI*\n\n"
-        f"🥬 Control de inventario para bodegas de perecederos.\n\n"
-        f"📥 *Registrar entrada* — escribe en lenguaje natural:\n"
+        f"👋 Hola *{user.first_name}*, soy *FreshTrack AI* 🥬\n\n"
+        f"Control de inventario para bodegas de perecederos.\n\n"
+        f"*Usa el menú de abajo o escribe directamente:*\n"
         f"`Lechuga 5 kg 10/12`\n"
         f"`Tomate 8 kg 09/12, Yogur 10 litros 15/12`\n\n"
-        f"⚙️ *Comandos disponibles:*\n"
-        f"/stock — Inventario FEFO completo\n"
-        f"/alertas — Próximos a vencer (≤3 días)\n"
-        f"/vencidos — Dar de baja vencidos\n"
-        f"/buscar `[producto]` — Buscar en stock\n"
-        f"/consumir `[producto] [cantidad]` — Consumo interno\n"
-        f"/despachar `[cliente]: [productos]` — Salida a cliente\n"
-        f"/clientes — Lista de clientes\n"
-        f"/addcliente `[nombre]` — Agregar cliente\n"
-        f"/reporte — Resumen del día\n"
-        f"/stats — Estadísticas globales\n"
-        f"/ayuda — Esta ayuda\n\n"
+        f"💡 _Tip: usa /cancelar para salir de cualquier flujo_\n\n"
         f"🆔 Tu chat ID: `{update.effective_chat.id}`"
     )
-    await update.message.reply_text(mensaje, parse_mode="Markdown")
+    await update.message.reply_text(
+        mensaje,
+        parse_mode="Markdown",
+        reply_markup=kb.MENU_PRINCIPAL,
+    )
 
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -496,11 +498,73 @@ async def addcliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# HANDLER DE MENSAJES (REGISTRO DE ENTRADAS)
+# HANDLER DE CONFIRMACIÓN — CallbackQuery tras parseo IA
+# ============================================================
+
+async def handle_confirmar_entrada(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja ✅ Confirmar todo / ❌ Cancelar tras parseo de texto libre con IA."""
+    query = update.callback_query
+    await query.answer()
+    accion = query.data.split(":")[1]
+
+    if accion == "cancelar":
+        context.user_data.pop("pending_entry", None)
+        await query.edit_message_text("❌ Entrada cancelada.")
+        return
+
+    pending = context.user_data.get("pending_entry")
+    if not pending:
+        await query.edit_message_text(
+            "❌ Sesión expirada. Envía el mensaje de nuevo."
+        )
+        return
+
+    productos = pending["productos"]
+    registrados = []
+    errores = []
+
+    for p in productos:
+        try:
+            db.registrar_producto(
+                producto=p["producto"],
+                cantidad=p["cantidad"],
+                unidad=p.get("unidad", "unidades"),
+                fecha_vencimiento=p["fecha_vencimiento"],
+                categoria=p.get("categoria", "general"),
+                usuario_id=pending["user_id"],
+                usuario_nombre=pending["user_nombre"],
+            )
+            emoji = kb.emoji_cat(p.get("categoria", "general"))
+            registrados.append(
+                f"{emoji} *{p['producto'].title()}* — "
+                f"{p['cantidad']} {p.get('unidad','uds')} | Vence: {p['fecha_vencimiento']}"
+            )
+        except Exception as e:
+            logger.error(f"Error registrando {p}: {e}")
+            errores.append(f"❌ *{p.get('producto','?')}*: error al guardar")
+
+    context.user_data.pop("pending_entry", None)
+
+    lineas = [f"✅ *{len(registrados)} producto(s) registrado(s):*\n"]
+    lineas.extend(registrados)
+    if errores:
+        lineas.append("\n*Errores:*")
+        lineas.extend(errores)
+    lineas.append("\n_Usa /stock para ver el inventario actualizado (FEFO)._")
+
+    await query.edit_message_text("\n\n".join(lineas), parse_mode="Markdown")
+
+
+# ============================================================
+# HANDLER DE MENSAJES (REGISTRO DE ENTRADAS — IA + CONFIRMACIÓN)
 # ============================================================
 
 async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Procesa mensajes de texto como registros de entrada de inventario."""
+    """
+    Procesa texto libre como entrada de inventario.
+    La IA parsea el mensaje y muestra un resumen con botones de confirmación.
+    Solo guarda en BD cuando el usuario presiona ✅ Confirmar todo.
+    """
     texto = update.message.text
     user = update.effective_user
 
@@ -516,35 +580,32 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "`Lechuga 5 kg 10/12`\n"
             "`Tomate 8 unidades 09/12, Yogur 10 litros 15/12`\n"
             "`Llegaron 12 cajas de queso que vencen el 20 de junio`\n\n"
-            "Usa /ayuda para ver más ejemplos.",
+            "Usa /ayuda para ver más ejemplos o el menú 📦 *Nueva Entrada*.",
             parse_mode="Markdown"
         )
         return
 
-    lineas = [f"📝 *{len(productos)} producto(s) registrado(s):*\n"]
-    for p in productos:
-        try:
-            db.registrar_producto(
-                producto=p["producto"],
-                cantidad=p["cantidad"],
-                unidad=p.get("unidad", "unidades"),
-                fecha_vencimiento=p["fecha_vencimiento"],
-                categoria=p.get("categoria", "general"),
-                usuario_id=user.id,
-                usuario_nombre=user.first_name
-            )
-            cat = f" [{p.get('categoria','general')}]" if p.get("categoria") else ""
-            lineas.append(
-                f"✅ *{p['producto'].title()}*{cat}\n"
-                f"   {p['cantidad']} {p.get('unidad','unidades')} | "
-                f"Vence: {p['fecha_vencimiento']}"
-            )
-        except Exception as e:
-            logger.error(f"Error registrando {p}: {e}")
-            lineas.append(f"❌ Error con: *{p.get('producto','?')}*")
+    # Guardar para confirmar con botones
+    context.user_data["pending_entry"] = {
+        "productos": productos,
+        "user_id": user.id,
+        "user_nombre": user.first_name,
+    }
 
-    lineas.append("\n_Usa /stock para ver el inventario actualizado (FEFO)._")
-    await msg.edit_text("\n\n".join(lineas), parse_mode="Markdown")
+    lineas = [f"📋 *Entendí {len(productos)} producto(s):*\n"]
+    for p in productos:
+        emoji = kb.emoji_cat(p.get("categoria", "general"))
+        lineas.append(
+            f"{emoji} *{p['producto'].title()}* — "
+            f"{p['cantidad']} {p.get('unidad','uds')} — vence {p['fecha_vencimiento']}"
+        )
+    lineas.append("\n¿Es correcto?")
+
+    await msg.edit_text(
+        "\n".join(lineas),
+        parse_mode="Markdown",
+        reply_markup=kb.kb_confirmar_entrada(productos),
+    )
 
 
 # ============================================================
@@ -559,26 +620,40 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
 
-    # Comandos
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ayuda", ayuda))
-    app.add_handler(CommandHandler("help", ayuda))
-    app.add_handler(CommandHandler("stock", consultar_stock))
-    app.add_handler(CommandHandler("alertas", alertas_vencimiento))
-    app.add_handler(CommandHandler("vencidos", dar_baja_vencidos))
-    app.add_handler(CommandHandler("stats", estadisticas))
-    app.add_handler(CommandHandler("reporte", reporte_diario))
-    app.add_handler(CommandHandler("buscar", buscar))
-    app.add_handler(CommandHandler("consumir", consumir))
-    app.add_handler(CommandHandler("despachar", despachar))
-    app.add_handler(CommandHandler("clientes", clientes))
+    # ── 1. ConversationHandlers (deben ir primero — mayor prioridad) ──
+    app.add_handler(conversations.get_conv_entrada())
+    app.add_handler(conversations.get_conv_consumo())
+    app.add_handler(conversations.get_conv_despacho())
+
+    # ── 2. Botones del menú que no son conversaciones ──
+    app.add_handler(MessageHandler(filters.Regex("^🔍 Ver Stock$"), consultar_stock))
+    app.add_handler(MessageHandler(filters.Regex("^⚠️ Alertas$"),   alertas_vencimiento))
+    app.add_handler(MessageHandler(filters.Regex("^📊 Reporte$"),    reporte_diario))
+
+    # ── 3. Comandos ──
+    app.add_handler(CommandHandler("cancelar",   conversations.cancelar))
+    app.add_handler(CommandHandler("start",      start))
+    app.add_handler(CommandHandler("ayuda",      ayuda))
+    app.add_handler(CommandHandler("help",       ayuda))
+    app.add_handler(CommandHandler("stock",      consultar_stock))
+    app.add_handler(CommandHandler("alertas",    alertas_vencimiento))
+    app.add_handler(CommandHandler("vencidos",   dar_baja_vencidos))
+    app.add_handler(CommandHandler("stats",      estadisticas))
+    app.add_handler(CommandHandler("reporte",    reporte_diario))
+    app.add_handler(CommandHandler("buscar",     buscar))
+    app.add_handler(CommandHandler("consumir",   consumir))
+    app.add_handler(CommandHandler("despachar",  despachar))
+    app.add_handler(CommandHandler("clientes",   clientes))
     app.add_handler(CommandHandler("addcliente", addcliente))
 
-    # Mensajes de texto = entradas de inventario
+    # ── 4. CallbackQuery: confirmación de entrada IA ──
+    app.add_handler(CallbackQueryHandler(handle_confirmar_entrada, pattern="^entrada:"))
+
+    # ── 5. Texto libre → IA (va al final, captura todo lo demás) ──
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje))
 
     print("=" * 60)
-    print("🥬 FreshTrack AI Bot v2")
+    print("🥬 FreshTrack AI Bot v3 — UI Interactiva")
     print("=" * 60)
     print("Bot iniciado. Esperando mensajes en Telegram...")
     print("Presiona Ctrl+C para detener.\n")

@@ -5,9 +5,17 @@ Operador de bodega - Distribuidora de Perecederos
 
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
 from supabase import create_client, Client
+
+_BOG = ZoneInfo("America/Bogota")
+
+
+def _ahora() -> str:
+    """Timestamp actual en hora Colombia (UTC-5), con timezone incluida."""
+    return datetime.now(_BOG).isoformat()
 
 load_dotenv()
 
@@ -34,7 +42,7 @@ def test_connection() -> bool:
 def _dias_hasta(fecha_str: str) -> int:
     """Calcula dias desde hoy hasta una fecha YYYY-MM-DD."""
     fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
-    return (fecha - datetime.now().date()).days
+    return (fecha - datetime.now(_BOG).date()).days
 
 
 # ============================================================
@@ -54,6 +62,7 @@ def registrar_producto(producto: str, cantidad: float, unidad: str,
         "cantidad": cantidad,
         "unidad": unidad,
         "fecha_vencimiento": fecha_vencimiento,
+        "fecha_registro": _ahora(),
         "lote": lote,
         "estado": "activo",
         "precio_unitario": precio_unitario,
@@ -67,6 +76,7 @@ def registrar_producto(producto: str, cantidad: float, unidad: str,
         "inventario_id": inventario_id,
         "tipo": "ENTRADA",
         "cantidad": cantidad,
+        "fecha": _ahora(),
         "motivo": "Registro de entrada",
         "usuario_id": usuario_id
     }).execute()
@@ -99,7 +109,7 @@ def consultar_stock(orden_fefo: bool = True) -> List[Dict]:
 
 def consultar_proximos_vencer(dias: int = 3) -> List[Dict]:
     """Productos que vencen en los proximos N dias (incluye vencidos)."""
-    fecha_limite = (datetime.now().date() + timedelta(days=dias)).isoformat()
+    fecha_limite = (datetime.now(_BOG).date() + timedelta(days=dias)).isoformat()
     productos = (
         supabase.table("inventario")
         .select("*")
@@ -192,6 +202,7 @@ def dar_de_baja(inventario_id: int, motivo: str = "Vencido",
         "inventario_id": inventario_id,
         "tipo": "BAJA",
         "cantidad": cantidad,
+        "fecha": _ahora(),
         "motivo": motivo,
         "usuario_id": usuario_id
     }).execute()
@@ -200,7 +211,7 @@ def dar_de_baja(inventario_id: int, motivo: str = "Vencido",
 
 def dar_de_baja_vencidos(usuario_id: int = None) -> List[Dict]:
     """Da de baja automatica todos los productos vencidos. Retorna la lista."""
-    hoy = datetime.now().date().isoformat()
+    hoy = datetime.now(_BOG).date().isoformat()
     vencidos = (
         supabase.table("inventario")
         .select("*")
@@ -266,6 +277,7 @@ def consumir_producto(nombre: str, cantidad: float,
             "inventario_id": lote["id"],
             "tipo": "CONSUMO",
             "cantidad": a_descontar,
+            "fecha": _ahora(),
             "motivo": motivo,
             "usuario_id": usuario_id
         }).execute()
@@ -347,6 +359,7 @@ def registrar_despacho(cliente_nombre: str, items: List[Dict],
     desp = supabase.table("despachos").insert({
         "cliente_id": cliente_id,
         "cliente_nombre": nombre_final,
+        "fecha": _ahora(),
         "observaciones": observaciones,
         "usuario_id": usuario_id,
         "usuario_nombre": usuario_nombre
@@ -410,6 +423,7 @@ def registrar_despacho(cliente_nombre: str, items: List[Dict],
                 "inventario_id": lote["id"],
                 "tipo": "DESPACHO",
                 "cantidad": a_descontar,
+                "fecha": _ahora(),
                 "motivo": f"Despacho #{despacho_id} → {nombre_final}",
                 "despacho_id": despacho_id,
                 "usuario_id": usuario_id
@@ -450,14 +464,15 @@ def consultar_despachos(limit: int = 10) -> List[Dict]:
 
 def reporte_diario() -> Dict:
     """Resumen de movimientos del dia de hoy."""
-    hoy = datetime.now().date().isoformat()
-    manana = (datetime.now().date() + timedelta(days=1)).isoformat()
+    _hoy_bog = datetime.now(_BOG)
+    inicio_dia = _hoy_bog.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    fin_dia = (_hoy_bog + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
     movimientos = (
         supabase.table("movimientos")
         .select("tipo, cantidad")
-        .gte("fecha", hoy)
-        .lt("fecha", manana)
+        .gte("fecha", inicio_dia)
+        .lt("fecha", fin_dia)
         .execute()
         .data
     )
@@ -465,8 +480,8 @@ def reporte_diario() -> Dict:
     despachos_hoy = (
         supabase.table("despachos")
         .select("id", count="exact")
-        .gte("fecha", hoy)
-        .lt("fecha", manana)
+        .gte("fecha", inicio_dia)
+        .lt("fecha", fin_dia)
         .execute()
         .count or 0
     )

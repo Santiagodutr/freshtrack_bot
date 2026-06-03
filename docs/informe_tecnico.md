@@ -593,14 +593,5 @@ python database.py
 
 ---
 
-## 10. EQUIPO DE DESARROLLO
-
-| Integrante | Rol | Módulos |
-|-----------|-----|---------|
-| Santiago Duarte | Base de datos y backend | `database.py`, `supabase_schema.sql` |
-| David Arango | IA y NLP | `ai_parser.py`, prompts Groq |
-| Sofía García | Bot y UI | `bot.py`, `conversations.py`, `keyboards.py` |
-
----
 
 *Documento generado automáticamente — FreshTrack AI v1.0*

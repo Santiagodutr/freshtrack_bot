@@ -29,7 +29,9 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
+# pyrefly: ignore [missing-import]
 from telegram import Update
+# pyrefly: ignore [missing-import]
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes,

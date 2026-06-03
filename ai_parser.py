@@ -6,6 +6,7 @@ Convierte texto natural en datos estructurados para FreshTrack AI.
 import os
 import json
 from datetime import datetime
+# pyrefly: ignore [missing-import]
 from groq import Groq
 from dotenv import load_dotenv
 
